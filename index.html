@@ -441,44 +441,38 @@ async function ia(prompt,max){
     return d.choices[0].message.content;
     
   } else if(prov==='gemini'){
-    // Se cota ja foi confirmada esgotada para esta chave, nao faz chamadas
+    // Bloqueia imediatamente se cota ja foi detectada esgotada nesta sessao
     if(_geminiQuotaEsgotada && _geminiQuotaKey===key){
       throw new Error('QUOTA_EXCEDIDA');
     }
-    // Tenta apenas um modelo por vez para nao multiplicar requests
-    var geminiModels=['gemini-2.0-flash','gemini-1.5-flash-latest'];
-    var lastError='Erro ao conectar com Gemini';
-    for(var mi=0;mi<geminiModels.length;mi++){
-      var gurl='https://generativelanguage.googleapis.com/v1beta/models/'+geminiModels[mi]+':generateContent?key='+key;
-      var gr;
-      try{
-        gr=await fetch(gurl,{
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:max||1000}})
-        });
-      }catch(fetchErr){lastError=fetchErr.message;continue;}
-      // 429 = cota/rate limit — para imediatamente, nao tenta mais modelos
-      if(gr.status===429){_geminiQuotaEsgotada=true;_geminiQuotaKey=key;throw new Error('QUOTA_EXCEDIDA');}
-      // 404 = modelo indisponivel — tenta o proximo
-      if(gr.status===404){lastError='Modelo '+geminiModels[mi]+' indisponivel';continue;}
-      var gd;
-      try{gd=await gr.json();}catch(e){lastError='Resposta invalida do servidor';continue;}
-      if(gd.error){
-        var em=(gd.error.message||'').toLowerCase();
-        if(em.indexOf('quota')>-1||em.indexOf('exceeded')>-1||em.indexOf('resource has been exhausted')>-1){
-          _geminiQuotaEsgotada=true;_geminiQuotaKey=key;
-          throw new Error('QUOTA_EXCEDIDA');
-        }
-        lastError=gd.error.message||'Erro da API Gemini';
-        continue;
-      }
-      if(gd.candidates && gd.candidates[0] && gd.candidates[0].content){
-        return gd.candidates[0].content.parts[0].text;
-      }
-      lastError='Sem candidatos na resposta';
+    // Um unico modelo — sem loop, sem requests em cascata
+    var gurl='https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key='+key;
+    var gr;
+    try{
+      gr=await fetch(gurl,{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:max||1000}})
+      });
+    }catch(fetchErr){throw new Error('Erro de rede: '+fetchErr.message);}
+    if(gr.status===429||gr.status===503){
+      _geminiQuotaEsgotada=true;_geminiQuotaKey=key;
+      throw new Error('QUOTA_EXCEDIDA');
     }
-    throw new Error(lastError);
+    var gd;
+    try{gd=await gr.json();}catch(e){throw new Error('Resposta invalida do servidor Gemini');}
+    if(gd.error){
+      var em=(gd.error.message||'').toLowerCase();
+      if(em.indexOf('quota')>-1||em.indexOf('exceeded')>-1||em.indexOf('exhausted')>-1||gr.status===429){
+        _geminiQuotaEsgotada=true;_geminiQuotaKey=key;
+        throw new Error('QUOTA_EXCEDIDA');
+      }
+      throw new Error(gd.error.message||'Erro da API Gemini (status '+gr.status+')');
+    }
+    if(gd.candidates && gd.candidates[0] && gd.candidates[0].content){
+      return gd.candidates[0].content.parts[0].text;
+    }
+    throw new Error('Gemini nao retornou resposta. Tente novamente.');
   }
   throw new Error('Provedor desconhecido: '+prov);
 }
