@@ -381,12 +381,18 @@ function salvarChaveIA(){
   var prov=document.getElementById('ia-provider').value;
   localStorage.setItem('ia-api-key',key);
   localStorage.setItem('ia-provider',prov);
+  // Reset cache de cota ao trocar a chave
+  _geminiQuotaEsgotada=false;
+  _geminiQuotaKey='';
 }
 
 async function testarIA(){
   var key=getIAKey();
   var prov=getIAProvider();
   if(!key){notif('Cole a chave de API primeiro!');return;}
+  // Permite nova tentativa mesmo apos quota esgotada
+  _geminiQuotaEsgotada=false;
+  _geminiQuotaKey='';
   var st=document.getElementById('ia-status');
   st.innerHTML='<span style="color:var(--txt2)">Testando...</span>';
   try{
@@ -404,6 +410,10 @@ async function testarIA(){
     notif('Erro na conexao. Veja detalhes abaixo.');
   }
 }
+
+// Cache de cota esgotada: evita chamadas repetidas apos quota excedida
+var _geminiQuotaEsgotada = false;
+var _geminiQuotaKey = '';
 
 async function ia(prompt,max){
   var key=getIAKey();
@@ -431,33 +441,44 @@ async function ia(prompt,max){
     return d.choices[0].message.content;
     
   } else if(prov==='gemini'){
-    var geminiModels=['gemini-2.0-flash','gemini-1.5-flash-latest','gemini-1.5-pro-latest'];
-    var lastError='';
+    // Se cota ja foi confirmada esgotada para esta chave, nao faz chamadas
+    if(_geminiQuotaEsgotada && _geminiQuotaKey===key){
+      throw new Error('QUOTA_EXCEDIDA');
+    }
+    // Tenta apenas um modelo por vez para nao multiplicar requests
+    var geminiModels=['gemini-2.0-flash','gemini-1.5-flash-latest'];
+    var lastError='Erro ao conectar com Gemini';
     for(var mi=0;mi<geminiModels.length;mi++){
+      var gurl='https://generativelanguage.googleapis.com/v1beta/models/'+geminiModels[mi]+':generateContent?key='+key;
+      var gr;
       try{
-        var gurl='https://generativelanguage.googleapis.com/v1beta/models/'+geminiModels[mi]+':generateContent?key='+key;
-        var gr=await fetch(gurl,{
+        gr=await fetch(gurl,{
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:max||1000}})
         });
-        if(gr.status===429){throw new Error('QUOTA_EXCEDIDA');}
-        var gd=await gr.json();
-        if(gd.error){
-          var em=gd.error.message||'';
-          if(em.toLowerCase().indexOf('quota')>-1||em.toLowerCase().indexOf('exceeded')>-1||em.toLowerCase().indexOf('resource')>-1){throw new Error('QUOTA_EXCEDIDA');}
-          if(gr.status===404){lastError=em;continue;}
-          throw new Error(em);
+      }catch(fetchErr){lastError=fetchErr.message;continue;}
+      // 429 = cota/rate limit — para imediatamente, nao tenta mais modelos
+      if(gr.status===429){_geminiQuotaEsgotada=true;_geminiQuotaKey=key;throw new Error('QUOTA_EXCEDIDA');}
+      // 404 = modelo indisponivel — tenta o proximo
+      if(gr.status===404){lastError='Modelo '+geminiModels[mi]+' indisponivel';continue;}
+      var gd;
+      try{gd=await gr.json();}catch(e){lastError='Resposta invalida do servidor';continue;}
+      if(gd.error){
+        var em=(gd.error.message||'').toLowerCase();
+        if(em.indexOf('quota')>-1||em.indexOf('exceeded')>-1||em.indexOf('resource has been exhausted')>-1){
+          _geminiQuotaEsgotada=true;_geminiQuotaKey=key;
+          throw new Error('QUOTA_EXCEDIDA');
         }
-        if(gd.candidates && gd.candidates[0]){return gd.candidates[0].content.parts[0].text;}
-        lastError='Sem resposta do modelo';
-      }catch(ex){
-        if(ex.message==='QUOTA_EXCEDIDA') throw ex;
-        lastError=ex.message;
+        lastError=gd.error.message||'Erro da API Gemini';
+        continue;
       }
+      if(gd.candidates && gd.candidates[0] && gd.candidates[0].content){
+        return gd.candidates[0].content.parts[0].text;
+      }
+      lastError='Sem candidatos na resposta';
     }
-    if(lastError==='QUOTA_EXCEDIDA'||lastError.indexOf('quota')>-1||lastError.indexOf('exceeded')>-1){throw new Error('QUOTA_EXCEDIDA');}
-    throw new Error(lastError||'Erro desconhecido no Gemini');
+    throw new Error(lastError);
   }
   throw new Error('Provedor desconhecido: '+prov);
 }
