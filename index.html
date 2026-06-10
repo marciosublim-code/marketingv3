@@ -431,8 +431,7 @@ async function ia(prompt,max){
     return d.choices[0].message.content;
     
   } else if(prov==='gemini'){
-    // Tenta modelos em sequencia ate um funcionar
-    var geminiModels=['gemini-1.5-flash-latest','gemini-2.0-flash','gemini-1.5-pro-latest','gemini-pro'];
+    var geminiModels=['gemini-2.0-flash','gemini-1.5-flash-latest','gemini-1.5-pro-latest'];
     var lastError='';
     for(var mi=0;mi<geminiModels.length;mi++){
       try{
@@ -442,20 +441,23 @@ async function ia(prompt,max){
           headers:{'Content-Type':'application/json'},
           body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:max||1000}})
         });
+        if(gr.status===429){throw new Error('QUOTA_EXCEDIDA');}
         var gd=await gr.json();
-        if(!gd.error && gd.candidates && gd.candidates[0]){
-          return gd.candidates[0].content.parts[0].text;
+        if(gd.error){
+          var em=gd.error.message||'';
+          if(em.toLowerCase().indexOf('quota')>-1||em.toLowerCase().indexOf('exceeded')>-1||em.toLowerCase().indexOf('resource')>-1){throw new Error('QUOTA_EXCEDIDA');}
+          if(gr.status===404){lastError=em;continue;}
+          throw new Error(em);
         }
-        lastError=gd.error?gd.error.message:'Sem resposta';
-        // Se for quota excedida, nao tenta proximo modelo
-        if(gd.error && gd.error.message && gd.error.message.indexOf('quota')>-1) break;
-      }catch(ex){lastError=ex.message;}
+        if(gd.candidates && gd.candidates[0]){return gd.candidates[0].content.parts[0].text;}
+        lastError='Sem resposta do modelo';
+      }catch(ex){
+        if(ex.message==='QUOTA_EXCEDIDA') throw ex;
+        lastError=ex.message;
+      }
     }
-    // Se todos falharam por quota, da mensagem clara
-    if(lastError.indexOf('quota')>-1 || lastError.indexOf('exceeded')>-1){
-      throw new Error('QUOTA_EXCEDIDA');
-    }
-    throw new Error(lastError);
+    if(lastError==='QUOTA_EXCEDIDA'||lastError.indexOf('quota')>-1||lastError.indexOf('exceeded')>-1){throw new Error('QUOTA_EXCEDIDA');}
+    throw new Error(lastError||'Erro desconhecido no Gemini');
   }
   throw new Error('Provedor desconhecido: '+prov);
 }
@@ -1401,7 +1403,5 @@ window.addEventListener('DOMContentLoaded', function(){
 </div>
 <div class="notif" id="notif"></div>
 <div id="status-bar" style="position:fixed;top:0;left:0;right:0;background:var(--verde);color:white;text-align:center;padding:6px;font-size:12px;z-index:300">Carregando...</div>
-</body>
-</html
 </body>
 </html>
